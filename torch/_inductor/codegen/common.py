@@ -518,6 +518,12 @@ class PythonPrinter(ExprPrinter):
         assert isinstance(ndigits, sympy.Integer)
         return f"round({self._print(number)}, {ndigits})"
 
+    def doprint(self, expr, *, simplify: bool = True):
+        # TODO: why are people passing strings to the printer here :think:
+        if simplify and isinstance(expr, sympy.Expr) and hasattr(V.graph, "sizevars"):
+            expr = V.graph.sizevars.simplify(expr)
+        return super().doprint(expr)
+
 
 class OpOverrides:
     def __init__(self, parent):
