@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import io
 import logging
+import os
 import re
 import unittest
 import warnings
@@ -5292,31 +5293,95 @@ def forward(self, x, y):
 
         inputs = (torch.randn(6), torch.randn(12))
         dynamic_shapes = {"x": [Dim("dx", min=4)], "y": [Dim("dy", min=4)]}
+
+        # we don't patch this yet, so test strict/non-strict manually
+        for _strict in [True, False]:
+            ep = torch.export._trace._export(
+                Foo(),
+                inputs,
+                strict=_strict,
+                dynamic_shapes=dynamic_shapes,
+                _allow_complex_guards_as_runtime_asserts=True,
+            )
+
+            # check forward pass
+            out0, out1 = ep.module()(torch.randn(9), torch.randn(27))
+            self.assertEqual(out0.shape, torch.ones(9).shape)
+            self.assertEqual(out1.shape, torch.ones(27).shape)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Ne\(s0 \- s1, 0\)",
+            ):  # fail only at runtime
+                ep.module()(torch.randn(4), torch.randn(4))  # fail
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Ne\(s0 \- s1\**3, 0\)",
+            ):
+                ep.module()(torch.randn(64), torch.randn(4))  # fail
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Eq\(s0\**2 \- 3\*s1, 0\)",
+            ):
+                ep.module()(torch.randn(10), torch.randn(9))  # fail
+
+            # count runtime asserts in graph, make sure we don't add them twice
+            self.assertEqual(
+                [
+                    node.target == torch.ops.aten._assert_scalar.default
+                    for node in ep.graph.nodes
+                ].count(True),
+                3,
+            )
+
+        # check that command line flag omits runtime asserts entirely
+        # dynamo checks this flag during initial dynamo import, so we can't test strict.
+        # at least we can check this for non-strict.
+        os.environ["TORCH_DYNAMO_DO_NOT_EMIT_RUNTIME_ASSERTS"] = "1"
+        ep = torch.export._trace._export(
+            Foo(),
+            inputs,
+            strict=False,
+            dynamic_shapes=dynamic_shapes,
+            _allow_complex_guards_as_runtime_asserts=True,
+        )
+        self.assertEqual(
+            [
+                node.target == torch.ops.aten._assert_scalar.default
+                for node in ep.graph.nodes
+            ].count(True),
+            0,
+        )
+
+    # we duplicate runtime asserts when retracing,
+    # track this as expected failure
+    @unittest.expectedFailure
+    def test_dedup_runtime_asserts_when_retrace(self):
+        class Foo(torch.nn.Module):
+            def forward(self, x,):
+                if x.shape[0] ** 2 + x.shape[1] * 3 + 2 != 64:
+                    return x + 2.0
+
+        inputs = (torch.randn(6, 3), )
+        dynamic_shapes = {"x": (Dim("d0"), Dim("d1"))}
         ep = torch.export._trace._export(
             Foo(),
             inputs,
             dynamic_shapes=dynamic_shapes,
             _allow_complex_guards_as_runtime_asserts=True,
         )
-        # check forward pass
-        out0, out1 = ep.module()(torch.randn(9), torch.randn(27))
-        self.assertEqual(out0.shape, torch.ones(9).shape)
-        self.assertEqual(out1.shape, torch.ones(27).shape)
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"Runtime assertion failed for expression Ne\(s0 \- s1, 0\)",
-        ):  # fail only at runtime
-            ep.module()(torch.randn(4), torch.randn(4))  # fail
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"Runtime assertion failed for expression Ne\(s0 \- s1\**3, 0\)",
-        ):
-            ep.module()(torch.randn(64), torch.randn(4))  # fail
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"Runtime assertion failed for expression Eq\(s0\**2 \- 3\*s1, 0\)",
-        ):
-            ep.module()(torch.randn(10), torch.randn(9))  # fail
+        ep_retrace = torch.export._trace._export(
+            ep.module(),
+            inputs,
+            dynamic_shapes=dynamic_shapes,
+            _allow_complex_guards_as_runtime_asserts=True,
+        )
+        self.assertEqual(
+            [
+                node.target == torch.ops.aten._assert_scalar.default
+                for node in ep_retrace.graph.nodes
+            ].count(True),
+            1,
+        )
 
     def test_constant_aliasing(self):
         class M1(torch.nn.Module):
