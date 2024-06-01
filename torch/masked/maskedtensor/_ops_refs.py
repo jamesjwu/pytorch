@@ -5,7 +5,7 @@ from typing import Callable, Any, Dict, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    import torch._ops
+    import torch._ops  # noqa: TCH004
 
 from .binary import (
     _apply_native_binary,
